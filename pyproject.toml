@@ -35,6 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+windows = [
+    "pystray>=0.19.5,<0.20",
+    "tomlkit>=0.13.3,<1",
+]
 # Required only when TELEGRAM_PROXY_TYPE is set to socks5/socks4/http.
 proxy = [
     "python-socks>=2.4.3",
@@ -54,7 +58,7 @@ whisper = [
 
 [tool.setuptools]
 py-modules = ["main", "migrate_session", "sanitize", "session_string_generator"]
-packages = ["telegram_mcp", "telegram_mcp.tools", "telegram_mcp.transport"]
+packages = ["telegram_mcp", "telegram_mcp.tools", "telegram_mcp.transport", "windows_app"]
 
 [project.scripts]
 telegram-mcp = "main:main"
@@ -68,6 +72,7 @@ target-version = ['py311']
 # flake8 config lives in .flake8 (flake8 does not read pyproject.toml)
 
 [dependency-groups]
+windows-build = ["pyinstaller>=6.15,<7"]
 dev = [
     "black>=25.9.0",
     "flake8>=7.3.0",

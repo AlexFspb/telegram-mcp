@@ -9,6 +9,47 @@
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
+## Windows installer — AlexFspb fork
+
+This fork includes a standalone Windows x64 installer and manager. Python is bundled;
+the target computer does not need Python, Git, Node.js, or uv.
+
+1. Download `TelegramMCP-Setup.exe` from this fork's **Releases**.
+2. Open the installer and enter your own Application API ID and API hash from
+   <https://my.telegram.org/apps>.
+3. Select Codex, Claude Desktop, and/or Claude Code.
+4. Sign in by QR code or phone number. Enter any verification code and 2FA password
+   only in the local installer window.
+5. Restart the selected clients after installation.
+
+The installer preserves unrelated settings and backs up each modified client
+configuration. It registers `telegram` in Codex's user `config.toml`, Claude
+Desktop's `claude_desktop_config.json`, and Claude Code's user `.claude.json`.
+Existing Codex tool restrictions and approval policy are preserved.
+
+All clients use small stdio bridges to **one** authenticated, loopback-only HTTP
+backend. The backend owns one Telegram connection; the original exclusive session
+lock remains enabled. A Windows task starts the common backend outside client
+process trees, so closing one client does not stop the others. Automatic start at
+Windows sign-in is optional in the installer.
+
+The tray icon opens settings/status or stops the server. Closing the settings
+window leaves the backend running. Credentials and the SQLite Telegram session
+are kept under `%LOCALAPPDATA%\AlexTelegramMCP\state`, with Windows permissions
+restricted to the installing user and SYSTEM. They are not embedded in this EXE,
+stored in client configurations, or included in the repository. Attachments use
+the separate `%LOCALAPPDATA%\AlexTelegramMCP\files` folder.
+
+Build from this fork on Windows:
+
+```powershell
+uv sync --frozen --extra windows --group windows-build
+uv run pytest tests/test_windows_installer.py -q
+uv run pyinstaller --noconfirm --clean TelegramMCP.spec
+```
+
+The output is `dist/TelegramMCP-Setup.exe`. The EXE is not digitally signed.
+
 ## 🤖 MCP in Action
 
 Basic Telegram MCP usage in Claude:
