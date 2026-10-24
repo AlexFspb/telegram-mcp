@@ -23,12 +23,23 @@ class Manager:
         self.photo = None
         self.qr_window = None
         self.status_pending = False
+        self.status_known = False
+        self.backend_active = False
+        self.last_status = None
+        self.status_generation = 0
+        self.service_action = None
         data = settings.values()
         self.api_id = tk.StringVar(value=data.get("TELEGRAM_API_ID", ""))
         self.api_hash = tk.StringVar(value=data.get("TELEGRAM_API_HASH", ""))
         self.phone = tk.StringVar()
         self.state_text = tk.StringVar(value="Проверяю состояние сервера…")
-        self.detail = tk.StringVar(value="Заполните API-данные, затем выберите способ входа.")
+        self.detail = tk.StringVar(
+            value=(
+                "Проверяю установленный сервер…"
+                if data.get("TELEGRAM_API_ID")
+                else "Заполните API-данные, затем выберите способ входа."
+            )
+        )
         saved_options = settings.options()
         self.autostart = tk.BooleanVar(value=saved_options.get("autostart", True))
         selected = saved_options.get("clients", list(settings.client_paths()))
@@ -46,9 +57,12 @@ class Manager:
         ttk.Label(outer, text=f"Установщик и общий сервер · версия {VERSION}").pack(
             anchor="w", pady=(2, 16)
         )
-        ttk.Label(outer, textvariable=self.state_text, font=("Segoe UI", 11, "bold")).pack(
-            anchor="w"
+        self.status_label = ttk.Label(
+            outer, textvariable=self.state_text, font=("Segoe UI", 11, "bold"), wraplength=620
         )
+        self.status_label.pack(anchor="w")
+        self.progress = ttk.Progressbar(outer, mode="indeterminate")
+        self.progress.pack(fill="x", pady=(8, 0))
 
         tabs = ttk.Notebook(outer)
         tabs.pack(fill="both", expand=True, pady=14)
@@ -56,6 +70,8 @@ class Manager:
         manage = ttk.Frame(tabs, padding=16)
         tabs.add(connect, text="Установка и вход")
         tabs.add(manage, text="Сервер и файлы")
+        if data.get("TELEGRAM_API_ID"):
+            tabs.select(manage)
 
         ttk.Label(connect, text="Application API ID").pack(anchor="w")
         ttk.Entry(connect, textvariable=self.api_id).pack(fill="x", pady=(4, 10))
@@ -97,13 +113,11 @@ class Manager:
         ttk.Label(
             manage, text="Один сервер обслуживает все чаты и все три приложения.", wraplength=530
         ).pack(anchor="w", pady=(0, 14))
-        for label, action in (
-            ("Запустить сервер", lambda: service.ensure_service(explicit=True)),
-            ("Остановить сервер", service.stop_service),
-        ):
-            self.button(manage, label, lambda action=action: self.work(action)).pack(
-                fill="x", pady=5
-            )
+        self.start_button = self.button(manage, "Запустить сервер", self.start_server)
+        self.start_button.pack(fill="x", pady=5)
+        self.stop_button = self.button(manage, "Остановить сервер", self.stop_server)
+        self.stop_button.pack(fill="x", pady=5)
+        ttk.Label(manage, textvariable=self.detail, wraplength=530).pack(anchor="w", pady=8)
         self.button(manage, "Обновить настройки приложений", self.reconfigure).pack(
             fill="x", pady=5
         )
@@ -147,6 +161,7 @@ class Manager:
         ).pack(anchor="w")
         self.window.after(100, self.poll)
         self.window.after(150, self.refresh_status)
+        self.update_buttons()
 
     def button(self, parent, text, action):
         button = ttk.Button(parent, text=text, command=action)
@@ -170,24 +185,95 @@ class Manager:
     def selected_clients(self):
         return [name for name, checked in self.clients.items() if checked.get()]
 
-    def work(self, action, success="Готово."):
+    def update_buttons(self):
+        for button in self.buttons:
+            button.state(["disabled"] if self.busy else ["!disabled"])
+        if self.busy or not self.status_known or self.backend_active:
+            self.start_button.state(["disabled"])
+        if self.busy or not self.status_known or not self.backend_active:
+            self.stop_button.state(["disabled"])
+        self.start_button.configure(
+            text=(
+                "Запуск…"
+                if self.service_action == "start"
+                else "Сервер запущен" if self.backend_active else "Запустить сервер"
+            )
+        )
+        self.stop_button.configure(
+            text=("Остановка…" if self.service_action == "stop" else "Остановить сервер")
+        )
+
+    def apply_status(self, result, active=False):
+        self.last_status = result
+        self.backend_active = bool(result) or active
+        self.status_known = True
+        if result and result.get("connected"):
+            text, color = "● Сервер работает. Telegram подключён.", "#1a7f37"
+        elif result:
+            text, color = "● Сервер запущен. Telegram не подключён.", "#9a6700"
+        elif active:
+            text, color = "● Процесс сервера запущен. Ожидаю ответа…", "#9a6700"
+        else:
+            text, color = "○ Сервер остановлен.", "#666666"
+        self.state_text.set(text)
+        self.status_label.configure(foreground=color)
+        self.update_buttons()
+
+    def accept_status(self, generation, result, active):
+        self.status_pending = False
+        if self.busy or generation != self.status_generation:
+            return
+        initial = not self.status_known
+        self.apply_status(result, active)
+        if initial and result and result.get("connected"):
+            self.detail.set(
+                "Сервер готов. Закройте окно и используйте Telegram через Codex или Claude."
+            )
+
+    @staticmethod
+    def read_status():
+        result = service.status()
+        return result, bool(result) or bool(security.recorded_processes())
+
+    def start_server(self):
+        if not self.status_known or self.backend_active:
+            return
+        self.work(
+            lambda: service.ensure_service(explicit=True),
+            "Сервер запущен. Telegram готов к работе.",
+            service_action="start",
+        )
+
+    def stop_server(self):
+        if not self.status_known or not self.backend_active:
+            return
+        self.work(service.stop_service, "Сервер остановлен.", service_action="stop")
+
+    def work(self, action, success="Готово.", service_action=None):
         if self.busy:
             return
         self.busy = True
+        self.status_generation += 1
+        self.service_action = service_action
         self.detail.set("Выполняю операцию…")
-        for button in self.buttons:
-            button.state(["disabled"])
+        if service_action:
+            self.state_text.set(
+                "Сервер запускается…" if service_action == "start" else "Сервер останавливается…"
+            )
+            self.status_label.configure(foreground="#9a6700")
+        self.progress.start(12)
+        self.update_buttons()
 
         def worker():
             try:
                 action()
-                self.events.put(("done", success))
+                self.events.put(("done", success, *self.read_status()))
             except Exception as error:
                 if isinstance(error, (ValueError, RuntimeError)):
                     detail = str(error)
                 else:
                     detail = f"Операция не завершена ({type(error).__name__}). Проверьте данные и подключение к сети."
-                self.events.put(("error", detail))
+                self.events.put(("error", detail, *self.read_status()))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -291,12 +377,13 @@ class Manager:
                     return
                 if event[0] in {"done", "error"}:
                     self.busy = False
+                    self.service_action = None
+                    self.progress.stop()
                     self.photo = None
                     if self.qr_window is not None:
                         self.qr_window.destroy()
                         self.qr_window = None
-                    for button in self.buttons:
-                        button.state(["!disabled"])
+                    self.apply_status(event[2], event[3])
                     self.detail.set(event[1])
                     if event[0] == "error":
                         messagebox.showerror("Telegram MCP", event[1], parent=self.window)
@@ -328,22 +415,18 @@ class Manager:
                         "На телефоне: Telegram → Настройки → Устройства → Подключить устройство."
                     )
                 elif event[0] == "status":
-                    self.status_pending = False
-                    result = event[1]
-                    self.state_text.set(
-                        f"● Сервер работает · PID {result['pid']} · 127.0.0.1:{settings.port()}"
-                        if result and result.get("connected")
-                        else "○ Сервер остановлен или Telegram не подключён"
-                    )
+                    self.accept_status(*event[1:])
         except queue.Empty:
             pass
         self.window.after(100, self.poll)
 
     def refresh_status(self):
-        if not self.status_pending:
+        if not self.status_pending and not self.busy:
             self.status_pending = True
+            generation = self.status_generation
             threading.Thread(
-                target=lambda: self.events.put(("status", service.status())), daemon=True
+                target=lambda: self.events.put(("status", generation, *self.read_status())),
+                daemon=True,
             ).start()
         self.window.after(2500, self.refresh_status)
 

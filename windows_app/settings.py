@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 from dotenv import dotenv_values
+from windows_app import VERSION
 
 TASK_NAME = "AlexTelegramMCP"
 CREATE_HIDDEN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -127,7 +128,7 @@ def save_credentials(api_id: str, api_hash: str) -> None:
             "TELEGRAM_SESSION_NAME": (state() / "telegram").as_posix(),
             "TELEGRAM_DEVICE_MODEL": "Alex Telegram MCP",
             "TELEGRAM_SYSTEM_VERSION": "Windows",
-            "TELEGRAM_APP_VERSION": "1.0.1",
+            "TELEGRAM_APP_VERSION": VERSION,
             "TELEGRAM_SERVER_ROOTS_ONLY": "1",
             "TELEGRAM_EXPOSED_TOOLS": "all",
             "TELEGRAM_ALIASES_FILE": (state() / "aliases.json").as_posix(),
