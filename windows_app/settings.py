@@ -167,6 +167,23 @@ def save_options(changes: dict) -> None:
     atomic_write(state() / "options.json", json.dumps(current, indent=2))
 
 
+def setup_complete() -> bool:
+    """Read saved setup evidence without opening the active Telegram database."""
+    try:
+        data = values()
+        return bool(
+            executable().is_file()
+            and (state() / "task-registered").is_file()
+            and "clients" in options()
+            and data.get("TELEGRAM_API_ID")
+            and data.get("TELEGRAM_API_HASH")
+            and data.get("TELEGRAM_EXPECTED_USER_ID")
+            and (state() / "telegram.session").is_file()
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def install_binary() -> None:
     prepare()
     if getattr(sys, "frozen", False):

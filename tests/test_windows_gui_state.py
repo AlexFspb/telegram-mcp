@@ -31,8 +31,13 @@ def manager():
     app.status_generation = 0
     app.service_action = None
     app.status_pending = False
+    app.installed = False
     app.start_button, app.stop_button, app.other_button = Button(), Button(), Button()
     app.buttons = [app.start_button, app.stop_button, app.other_button]
+    app.install_button, app.login_button, app.configure_button = Button(), Button(), Button()
+    app.buttons.extend([app.install_button, app.login_button, app.configure_button])
+    app.installation_text = Mock()
+    app.credential_entries = [Button(), Button(), Button()]
     app.state_text, app.detail, app.status_label, app.progress = Mock(), Mock(), Mock(), Mock()
     app.window = Mock()
     app.events = queue.Queue()
@@ -115,3 +120,55 @@ def test_worker_disables_actions_before_starting_and_rejects_repeated_clicks(man
     manager.start_server()
     assert thread.call_count == 1
     manager.progress.start.assert_called_once()
+
+
+def test_installed_setup_is_disabled_even_when_server_is_stopped(manager):
+    manager.apply_status(None, active=False, installed=True)
+    assert manager.install_button.disabled and manager.login_button.disabled
+    assert manager.install_button.text == "Установлено"
+    assert manager.login_button.text == "Вход выполнен"
+    assert not manager.start_button.disabled
+    assert not manager.configure_button.disabled
+    manager.work = Mock()
+    manager.install("qr")
+    manager.install("phone")
+    manager.work.assert_not_called()
+
+
+def test_successful_setup_stays_disabled_after_operation_completion(manager):
+    manager.busy = True
+    manager.events.put(("done", "Установлено.", {"connected": True}, True, True))
+    manager.poll()
+    assert manager.installed
+    assert manager.install_button.disabled and manager.login_button.disabled
+    assert manager.install_button.text == "Установлено"
+
+
+def test_logout_allows_new_login_without_restarting_settings_window(manager):
+    manager.apply_status({"connected": True}, installed=True)
+    manager.events.put(("done", "Сеанс завершён.", None, False, False))
+    manager.poll()
+    assert not manager.installed
+    assert not manager.install_button.disabled and not manager.login_button.disabled
+    assert manager.configure_button.disabled
+
+
+def test_partial_setup_still_allows_installation(manager):
+    manager.apply_status(None, installed=False)
+    assert not manager.install_button.disabled
+    assert not manager.login_button.disabled
+
+
+def test_reconfigure_saves_client_selection_and_autostart(manager, monkeypatch):
+    from windows_app import gui
+
+    manager.selected_clients = lambda: ["codex"]
+    manager.autostart = Mock()
+    manager.autostart.get.return_value = False
+    manager.work = lambda action, success: action()
+    task, clients = Mock(), Mock()
+    monkeypatch.setattr(gui.settings, "register_task", task)
+    monkeypatch.setattr(gui.settings, "configure_clients", clients)
+    manager.reconfigure()
+    task.assert_called_once_with(False)
+    clients.assert_called_once_with(["codex"])

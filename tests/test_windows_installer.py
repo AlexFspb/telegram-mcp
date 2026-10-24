@@ -134,3 +134,21 @@ async def test_http_control_requires_token_and_preserves_underlying_protocol():
         assert calls == ["/mcp"]
         assert (await client.post("/control/shutdown", headers=headers)).status_code == 200
         assert stopped == [True]
+
+
+def test_setup_complete_requires_saved_authorization_and_client_registration(local_home):
+    settings.state().mkdir(parents=True)
+    settings.executable().write_bytes(b"test-only-executable")
+    settings.save({"TELEGRAM_API_ID": "123", "TELEGRAM_API_HASH": "test-only"})
+    assert not settings.setup_complete()
+    (settings.state() / "telegram.session").write_bytes(b"test-only-session")
+    (settings.state() / "task-registered").write_text("yes")
+    settings.save_options({"clients": []})
+    assert not settings.setup_complete()
+    settings.save({"TELEGRAM_EXPECTED_USER_ID": "42"})
+    assert settings.setup_complete()
+    # Stopping a backend leaves the installation and authorization intact.
+    (settings.state() / "stopped").write_text("yes")
+    assert settings.setup_complete()
+    settings.env_path().unlink()
+    assert not settings.setup_complete()

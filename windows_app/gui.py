@@ -28,10 +28,12 @@ class Manager:
         self.last_status = None
         self.status_generation = 0
         self.service_action = None
+        self.installed = settings.setup_complete()
         data = settings.values()
         self.api_id = tk.StringVar(value=data.get("TELEGRAM_API_ID", ""))
         self.api_hash = tk.StringVar(value=data.get("TELEGRAM_API_HASH", ""))
         self.phone = tk.StringVar()
+        self.installation_text = tk.StringVar()
         self.state_text = tk.StringVar(value="Проверяю состояние сервера…")
         self.detail = tk.StringVar(
             value=(
@@ -70,16 +72,19 @@ class Manager:
         manage = ttk.Frame(tabs, padding=16)
         tabs.add(connect, text="Установка и вход")
         tabs.add(manage, text="Сервер и файлы")
-        if data.get("TELEGRAM_API_ID"):
+        if self.installed:
             tabs.select(manage)
 
+        self.credential_entries = []
         ttk.Label(connect, text="Application API ID").pack(anchor="w")
-        ttk.Entry(connect, textvariable=self.api_id).pack(fill="x", pady=(4, 10))
+        api_id_entry = ttk.Entry(connect, textvariable=self.api_id)
+        api_id_entry.pack(fill="x", pady=(4, 10))
+        self.credential_entries.append(api_id_entry)
         ttk.Label(connect, text="Application API hash").pack(anchor="w")
-        ttk.Entry(connect, textvariable=self.api_hash, show="●").pack(fill="x", pady=(4, 6))
-        ttk.Label(
-            connect, text="Получите собственные данные на my.telegram.org/apps.", wraplength=540
-        ).pack(anchor="w")
+        api_hash_entry = ttk.Entry(connect, textvariable=self.api_hash, show="●")
+        api_hash_entry.pack(fill="x", pady=(4, 6))
+        self.credential_entries.append(api_hash_entry)
+        ttk.Label(connect, textvariable=self.installation_text, wraplength=540).pack(anchor="w")
 
         targets = ttk.LabelFrame(connect, text="Автоматически настроить", padding=10)
         targets.pack(fill="x", pady=14)
@@ -94,15 +99,19 @@ class Manager:
         ttk.Checkbutton(
             connect, text="Запускать сервер при входе в Windows", variable=self.autostart
         ).pack(anchor="w")
-        self.button(connect, "Установить и войти по QR-коду", lambda: self.install("qr")).pack(
-            fill="x", pady=(14, 8)
+        self.install_button = self.button(
+            connect, "Установить и войти по QR-коду", lambda: self.install("qr")
         )
+        self.install_button.pack(fill="x", pady=(10, 8))
         phone_row = ttk.Frame(connect)
         phone_row.pack(fill="x")
-        ttk.Entry(phone_row, textvariable=self.phone).pack(
-            side="left", fill="x", expand=True, padx=(0, 8)
+        phone_entry = ttk.Entry(phone_row, textvariable=self.phone)
+        phone_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.credential_entries.append(phone_entry)
+        self.login_button = self.button(
+            phone_row, "Войти по номеру", lambda: self.install("phone")
         )
-        self.button(phone_row, "Войти по номеру", lambda: self.install("phone")).pack(side="right")
+        self.login_button.pack(side="right")
         ttk.Label(
             connect,
             text="Номер телефона с кодом страны нужен только для входа по номеру.",
@@ -118,9 +127,10 @@ class Manager:
         self.stop_button = self.button(manage, "Остановить сервер", self.stop_server)
         self.stop_button.pack(fill="x", pady=5)
         ttk.Label(manage, textvariable=self.detail, wraplength=530).pack(anchor="w", pady=8)
-        self.button(manage, "Обновить настройки приложений", self.reconfigure).pack(
-            fill="x", pady=5
+        self.configure_button = self.button(
+            manage, "Обновить настройки приложений", self.reconfigure
         )
+        self.configure_button.pack(fill="x", pady=5)
         self.button(
             manage, "Открыть папку файлов", lambda: self.open_path(settings.root() / "files")
         ).pack(fill="x", pady=5)
@@ -192,6 +202,26 @@ class Manager:
             self.start_button.state(["disabled"])
         if self.busy or not self.status_known or not self.backend_active:
             self.stop_button.state(["disabled"])
+        for button in (self.install_button, self.login_button):
+            if self.busy or self.installed:
+                button.state(["disabled"])
+        if self.busy or not self.installed:
+            self.configure_button.state(["disabled"])
+        self.install_button.configure(
+            text="Установлено" if self.installed else "Установить и войти по QR-коду"
+        )
+        self.login_button.configure(text="Вход выполнен" if self.installed else "Войти по номеру")
+        self.installation_text.set(
+            "Установка завершена. Повторная установка не требуется. Для смены аккаунта сначала выполните выход."
+            if self.installed
+            else "Получите собственные API-данные на my.telegram.org/apps и выполните вход."
+        )
+        for entry in self.credential_entries:
+            entry.state(
+                ["disabled"]
+                if self.busy
+                else ["!disabled", "readonly"] if self.installed else ["!disabled", "!readonly"]
+            )
         self.start_button.configure(
             text=(
                 "Запуск…"
@@ -203,7 +233,9 @@ class Manager:
             text=("Остановка…" if self.service_action == "stop" else "Остановить сервер")
         )
 
-    def apply_status(self, result, active=False):
+    def apply_status(self, result, active=False, installed=None):
+        if installed is not None:
+            self.installed = installed
         self.last_status = result
         self.backend_active = bool(result) or active
         self.status_known = True
@@ -219,12 +251,12 @@ class Manager:
         self.status_label.configure(foreground=color)
         self.update_buttons()
 
-    def accept_status(self, generation, result, active):
+    def accept_status(self, generation, result, active, installed=None):
         self.status_pending = False
         if self.busy or generation != self.status_generation:
             return
         initial = not self.status_known
-        self.apply_status(result, active)
+        self.apply_status(result, active, installed)
         if initial and result and result.get("connected"):
             self.detail.set(
                 "Сервер готов. Закройте окно и используйте Telegram через Codex или Claude."
@@ -233,7 +265,11 @@ class Manager:
     @staticmethod
     def read_status():
         result = service.status()
-        return result, bool(result) or bool(security.recorded_processes())
+        return (
+            result,
+            bool(result) or bool(security.recorded_processes()),
+            settings.setup_complete(),
+        )
 
     def start_server(self):
         if not self.status_known or self.backend_active:
@@ -278,6 +314,8 @@ class Manager:
         threading.Thread(target=worker, daemon=True).start()
 
     def install(self, method):
+        if self.busy or self.installed:
+            return
         api_id, api_hash, phone = (
             self.api_id.get().strip(),
             self.api_hash.get().strip(),
@@ -307,8 +345,14 @@ class Manager:
 
     def reconfigure(self):
         selected = self.selected_clients()
+        autostart = self.autostart.get()
+
+        def action():
+            settings.register_task(autostart)
+            settings.configure_clients(selected)
+
         self.work(
-            lambda: settings.configure_clients(selected),
+            action,
             "Настройки сохранены. Перезапустите выбранные приложения.",
         )
 
@@ -383,7 +427,7 @@ class Manager:
                     if self.qr_window is not None:
                         self.qr_window.destroy()
                         self.qr_window = None
-                    self.apply_status(event[2], event[3])
+                    self.apply_status(*event[2:])
                     self.detail.set(event[1])
                     if event[0] == "error":
                         messagebox.showerror("Telegram MCP", event[1], parent=self.window)
