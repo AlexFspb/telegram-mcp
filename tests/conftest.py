@@ -21,5 +21,5 @@ def transcript_cache_dir(tmp_path, monkeypatch):
 def _clear_expected_username(monkeypatch):
     """Keep a developer's TELEGRAM_EXPECTED_USERNAME* (.env) away from fake clients."""
     for key in list(os.environ):
-        if key.startswith("TELEGRAM_EXPECTED_USERNAME"):
+        if key.startswith(("TELEGRAM_EXPECTED_USERNAME", "TELEGRAM_EXPECTED_USER_ID")):
             monkeypatch.delenv(key, raising=False)

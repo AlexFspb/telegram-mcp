@@ -1,3 +1,3 @@
-"""Windows installer and shared local server for AlexFspb/telegram-mcp."""
+"""Windows installer and shared Telegram MCP service."""
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"

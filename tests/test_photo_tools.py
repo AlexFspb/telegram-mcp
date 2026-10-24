@@ -280,6 +280,6 @@ async def test_photo_sheet_caps_the_number_of_tiles_it_will_request(patched_medi
 
 
 @pytest.mark.parametrize("tool_name", ["list_photos", "open_photo", "get_photo_sheet"])
-def test_photo_tools_survive_read_only_exposure(tool_name):
+def test_photo_tools_describe_optional_file_writes(tool_name):
     registered = {tool.name: tool for tool in runtime.mcp._tool_manager.list_tools()}
-    assert registered[tool_name].annotations.readOnlyHint is True
+    assert registered[tool_name].annotations.readOnlyHint is (tool_name != "open_photo")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -13,7 +14,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from dotenv import dotenv_values
 
@@ -92,7 +97,7 @@ def atomic_write(path: Path, data: str) -> None:
 
 
 def values() -> dict:
-    return dict(dotenv_values(env_path()))
+    return dict(dotenv_values(env_path(), interpolate=False))
 
 
 def save(values_to_save: dict) -> None:
@@ -122,7 +127,7 @@ def save_credentials(api_id: str, api_hash: str) -> None:
             "TELEGRAM_SESSION_NAME": (state() / "telegram").as_posix(),
             "TELEGRAM_DEVICE_MODEL": "Alex Telegram MCP",
             "TELEGRAM_SYSTEM_VERSION": "Windows",
-            "TELEGRAM_APP_VERSION": "1.0.0",
+            "TELEGRAM_APP_VERSION": "1.0.1",
             "TELEGRAM_SERVER_ROOTS_ONLY": "1",
             "TELEGRAM_EXPOSED_TOOLS": "all",
             "TELEGRAM_ALIASES_FILE": (state() / "aliases.json").as_posix(),
@@ -168,7 +173,7 @@ def install_binary() -> None:
         if source != executable().resolve():
             temporary = executable().with_suffix(".new.exe")
             shutil.copy2(source, temporary)
-            os.replace(temporary, executable())
+            replace_binary(temporary, executable())
         shortcut = (
             Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Telegram MCP.lnk"
         )
@@ -184,10 +189,73 @@ def install_binary() -> None:
             f"$link.WorkingDirectory = {quote(root())}; "
             "$link.Description = 'Telegram MCP settings'; $link.Save()"
         )
-        run_hidden(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True
-        )
+        try:
+            run_hidden(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True
+            )
+        except (OSError, subprocess.SubprocessError):
+            logging.warning("Не удалось создать ярлык меню Пуск. Сервер установлен.")
     create_token()
+    from windows_app import security
+
+    security.prepare_endpoint()
+
+
+def proxy_config():
+    data = values()
+    kind = data.get("TELEGRAM_PROXY_TYPE", "").strip().lower()
+    if not kind or kind == "none":
+        return None
+    if kind not in {"socks5", "socks4", "http"}:
+        raise ValueError("Выберите тип прокси: socks5, socks4 или http.")
+    host = data.get("TELEGRAM_PROXY_HOST", "").strip()
+    try:
+        port_value = int(data.get("TELEGRAM_PROXY_PORT", ""))
+    except ValueError:
+        raise ValueError("Введите порт прокси от 1 до 65535.") from None
+    if not host or not 1 <= port_value <= 65535:
+        raise ValueError("Проверьте адрес и порт прокси.")
+    return {
+        "proxy_type": kind,
+        "addr": host,
+        "port": port_value,
+        "rdns": True,
+        "username": data.get("TELEGRAM_PROXY_USERNAME") or None,
+        "password": data.get("TELEGRAM_PROXY_PASSWORD") or None,
+    }
+
+
+def replace_binary(temporary: Path, target: Path) -> None:
+    """Windows allows renaming a running image, but not replacing it in place."""
+    previous = target.with_name(target.name + ".old-" + secrets.token_hex(5))
+    moved = False
+    try:
+        if target.exists():
+            target.rename(previous)
+            moved = True
+        temporary.rename(target)
+    except Exception:
+        if moved and not target.exists():
+            previous.rename(target)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+    for old in target.parent.glob(target.name + ".old-*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass  # An existing client may still run this version.
+
+
+def desktop_paths(appdata: Path) -> list[Path]:
+    paths = [appdata / "Claude" / "claude_desktop_config.json"]
+    packages = Path(os.environ.get("LOCALAPPDATA", str(appdata.parent))) / "Packages"
+    if packages.is_dir():
+        for package in packages.glob("Claude_*"):
+            roaming = package / "LocalCache" / "Roaming" / "Claude"
+            if roaming.is_dir():
+                paths.append(roaming / "claude_desktop_config.json")
+    return paths
 
 
 def client_paths(home: Path | None = None, appdata: Path | None = None) -> dict[str, Path]:
@@ -195,7 +263,7 @@ def client_paths(home: Path | None = None, appdata: Path | None = None) -> dict[
     appdata = appdata or Path(os.environ["APPDATA"])
     return {
         "codex": Path(os.environ.get("CODEX_HOME", str(home / ".codex"))) / "config.toml",
-        "claude-desktop": appdata / "Claude" / "claude_desktop_config.json",
+        "claude-desktop": desktop_paths(appdata)[-1],
         "claude-code": home / ".claude.json",
     }
 
@@ -259,18 +327,31 @@ def merge_claude(text: str, invocation: list[str]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
-def configure_clients(selected: list[str], paths: dict | None = None) -> list[str]:
-    paths = paths or client_paths()
+def configure_clients(selected: list[str], paths: dict | None = None) -> list[str]:  # noqa: C901
+    supplied = paths is not None
+    paths = paths if supplied else client_paths()
     invocation = command("--stdio")
     planned = []
-    for name in selected:
-        path = paths[name]
-        original = path.read_bytes() if path.exists() else None
-        text = original.decode("utf-8-sig") if original is not None else ""
-        updated = (
-            merge_codex(text, invocation) if name == "codex" else merge_claude(text, invocation)
-        )
-        planned.append((path, original, updated))
+    names = list(dict.fromkeys(selected + options().get("clients", [])))
+    for name in names:
+        if name not in paths:
+            continue
+        targets = [paths[name]]
+        if name == "claude-desktop" and not supplied:
+            targets = desktop_paths(Path(os.environ["APPDATA"]))
+        for path in targets:
+            original = path.read_bytes() if path.exists() else None
+            text = original.decode("utf-8-sig") if original is not None else ""
+            if name in selected:
+                updated = (
+                    merge_codex(text, invocation)
+                    if name == "codex"
+                    else merge_claude(text, invocation)
+                )
+            else:
+                updated = remove_registration(text, name)
+            if updated.encode("utf-8") != original and (original is not None or name in selected):
+                planned.append((path, original, updated))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     written = []
     try:
@@ -292,7 +373,67 @@ def configure_clients(selected: list[str], paths: dict | None = None) -> list[st
                 else:
                     path.write_bytes(original)
         raise
+    for path, _, _ in planned:
+        backups = sorted(path.parent.glob(path.name + ".before-telegram-*.bak"), reverse=True)
+        for backup in backups[3:]:
+            try:
+                backup.unlink()
+            except OSError:
+                pass
     return [str(item[0]) for item in planned]
+
+
+def remove_registration(text: str, name: str) -> str:
+    import tomlkit
+
+    if not text.strip():
+        return text
+    data = tomlkit.parse(text) if name == "codex" else json.loads(text)
+    servers = data.get("mcp_servers" if name == "codex" else "mcpServers", {})
+    entry = servers.get("telegram", {})
+    ours = (
+        entry.get("command") == command("--stdio")[0]
+        and entry.get("args") == command("--stdio")[1:]
+    )
+    # Never remove another server just because it uses the same display name.
+    if not ours:
+        return text
+    servers.pop("telegram")
+    return (
+        tomlkit.dumps(data)
+        if name == "codex"
+        else json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    )
+
+
+def unregister():
+    configure_clients([])
+    if run_hidden(["schtasks", "/Query", "/TN", TASK_NAME]).returncode == 0:
+        if run_hidden(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"]).returncode:
+            raise RuntimeError("Не удалось удалить задачу запуска сервера.")
+    (state() / "task-registered").unlink(missing_ok=True)
+    shortcut = (
+        Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Telegram MCP.lnk"
+    )
+    shortcut.unlink(missing_ok=True)
+
+
+def schedule_binary_removal(gui_pid):
+    if not getattr(sys, "frozen", False):
+        return
+    # Only our known executable files; downloaded files and other user data remain.
+    targets = [executable(), *root().glob("TelegramMCP.exe.old-*")]
+    quoted = ",".join("'" + str(path).replace("'", "''") + "'" for path in targets)
+    script = (
+        f"Wait-Process -Id {int(gui_pid)} -ErrorAction SilentlyContinue; "
+        "Start-Sleep -Seconds 2; "
+        f"Remove-Item -LiteralPath @({quoted}) -Force -ErrorAction SilentlyContinue"
+    )
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        creationflags=CREATE_HIDDEN,
+        close_fds=True,
+    )
 
 
 def register_task(autostart: bool = True) -> None:

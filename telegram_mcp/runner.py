@@ -78,10 +78,16 @@ def _expected_username(label: str) -> str:
 async def _verify_expected_username(label: str, client) -> None:
     """Refuse to serve a session logged in to a different account."""
     expected = _expected_username(label)
-    if not expected:
+    expected_id = os.getenv("TELEGRAM_EXPECTED_USER_ID")
+    if not expected and not expected_id:
         return
 
     me = await client.get_me()
+    if expected_id:
+        if str(getattr(me, "id", "")) == expected_id:
+            return
+        await client.disconnect()
+        raise RuntimeError("Telegram account ID does not match the configured account.")
     usernames = {_normalize_username(getattr(me, "username", None))}
     for entry in getattr(me, "usernames", None) or []:
         if getattr(entry, "active", False):

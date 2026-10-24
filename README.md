@@ -27,7 +27,7 @@ configuration. It registers `telegram` in Codex's user `config.toml`, Claude
 Desktop's `claude_desktop_config.json`, and Claude Code's user `.claude.json`.
 Existing Codex tool restrictions and approval policy are preserved.
 
-All clients use small stdio bridges to **one** authenticated, loopback-only HTTP
+All clients use stdio bridges to **one** authenticated, loopback-only HTTPS
 backend. The backend owns one Telegram connection; the original exclusive session
 lock remains enabled. A Windows task starts the common backend outside client
 process trees, so closing one client does not stop the others. Automatic start at
@@ -40,15 +40,55 @@ restricted to the installing user and SYSTEM. They are not embedded in this EXE,
 stored in client configurations, or included in the repository. Attachments use
 the separate `%LOCALAPPDATA%\AlexTelegramMCP\files` folder.
 
+Windows 1.0.1 also detects Claude Desktop MSIX configuration folders. It updates
+both the classic and discovered package configurations, preserving other servers.
+Local connections verify a private installation certificate before sending the
+Bearer token. New installations select a free local port. No certificate is added
+to the Windows trust store.
+
+The bridge stays connected to its client when the backend restarts. A failed
+request is **never automatically replayed**: an operation such as sending a
+message may already have completed. Check its result before repeating it.
+Stopping the server from the tray prevents client requests from restarting it;
+start it explicitly from settings. Windows sign-in autostart remains optional.
+
+For updates, run the new EXE and select installation with your existing account.
+The updater can rename an executable still used by existing clients and restore
+it if replacement fails. Old 1.0.0 client bridges need one client restart to adopt
+the new HTTPS transport. Later backend restarts do not require restarting clients.
+
+Proxy settings (SOCKS5/SOCKS4/HTTP) are available in the **Прокси** tab; proxy support
+is included in the EXE. Invalid login codes and 2FA passwords can be corrected in
+the same bounded login flow, without requesting a new code each time.
+
+Use **Сервер и файлы → Выйти из аккаунта Telegram** to revoke this session, or
+**Удалить Telegram MCP** to revoke it and remove client registrations, the startup
+task, shortcut, and executable. Downloaded files are retained. If Telegram cannot
+confirm logout, the operation stops and retains the credentials for another attempt.
+You can also revoke the **Alex Telegram MCP** session in Telegram under
+**Settings → Devices**. Existing legacy-session backups are not automatically
+deleted: revoke any unused sessions and remove those backups yourself.
+
+Windows file tools reject UNC/device paths and reparse points before resolution,
+and verify lexical containment before accessing the filesystem. Internet downloads
+receive Windows Mark-of-the-Web. Extracted document text is explicitly marked as
+untrusted data; the label does not replace the client's instruction protections.
+Configuration backups and the backend log have retention limits.
+
 Build from this fork on Windows:
 
 ```powershell
 uv sync --frozen --extra windows --group windows-build
-uv run pytest tests/test_windows_installer.py -q
+uv run pytest tests/test_windows_installer.py tests/test_windows_review.py tests/test_windows_bridge.py -q
 uv run pyinstaller --noconfirm --clean TelegramMCP.spec
 ```
 
 The output is `dist/TelegramMCP-Setup.exe`. The EXE is not digitally signed.
+It uses PyInstaller onefile packaging, so each bridge extracts bundled libraries
+into a temporary folder. Hard termination may leave a temporary extraction folder.
+Release SHA-256 checksums verify file integrity; they are not a code signature or
+an independent provenance attestation. GitHub Actions provenance requires a release
+workflow and repository authorization; local builds do not claim that attestation.
 
 ## 🤖 MCP in Action
 

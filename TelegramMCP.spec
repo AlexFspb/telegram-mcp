@@ -12,8 +12,11 @@ build_info.mkdir(parents=True, exist_ok=True)
 # PyInstaller imports packages while locating native DLLs. Use build-only dummy
 # configuration: never load a user's Telegram credentials or authenticated session.
 for key in list(os.environ):
-    if key.startswith(("TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME_")):
+    if key.startswith(("TELEGRAM_", "MCP_")):
         os.environ.pop(key, None)
+dummy_env = build_info / "build-only.env"
+dummy_env.write_text("# Build-time placeholders only\n", encoding="utf-8")
+os.environ["TELEGRAM_MCP_ENV_FILE"] = str(dummy_env)
 os.environ["TELEGRAM_API_ID"] = "1"
 os.environ["TELEGRAM_API_HASH"] = "build-placeholder-not-a-secret"
 os.environ["TELEGRAM_SESSION_NAME"] = str(build_info / "build-only")

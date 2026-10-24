@@ -11,11 +11,26 @@ import sys
 from windows_app import settings, service
 
 
+def upgrade_current():
+    with service.local_lock("bootstrap.lock", timeout=180):
+        if not settings.env_path().exists():
+            raise RuntimeError("Установка не найдена. Откройте установщик для входа.")
+        service.stop_service()
+        settings.install_binary()
+        settings.register_task(settings.options().get("autostart", True))
+        settings.configure_clients(
+            settings.options().get("clients", ["codex", "claude-desktop", "claude-code"])
+        )
+    print(json.dumps(service.ensure_service(explicit=True)))
+
+
 def migrate_legacy(folder: Path):
     from dotenv import dotenv_values
 
     old = dotenv_values(folder / "state" / ".env")
     source = Path(old["TELEGRAM_SESSION_NAME"] + ".session")
+    if not source.is_absolute():
+        source = (folder / source).resolve()
     service.stop_service()
     settings.install_binary()
     destination = settings.state() / "telegram.session"
@@ -48,7 +63,7 @@ def migrate_legacy(folder: Path):
     settings.save({"TELEGRAM_EXPECTED_USERNAME": old.get("TELEGRAM_EXPECTED_USERNAME", "")})
     settings.register_task(True)
     settings.configure_clients(["codex", "claude-desktop", "claude-code"])
-    print(json.dumps(service.ensure_service()))
+    print(json.dumps(service.ensure_service(explicit=True)))
 
 
 def main():
@@ -59,6 +74,7 @@ def main():
     parser.add_argument("--start", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--upgrade", action="store_true")
     parser.add_argument("--migrate-legacy", type=Path)
     args = parser.parse_args()
     if args.self_check:
@@ -81,6 +97,8 @@ def main():
                 }
             )
         )
+    elif args.upgrade:
+        upgrade_current()
     elif args.serve:
         service.serve()
     elif args.stdio:
@@ -88,7 +106,7 @@ def main():
     elif args.status:
         print(json.dumps(service.status() or {"running": False}))
     elif args.start:
-        print(json.dumps(service.ensure_service()))
+        print(json.dumps(service.ensure_service(explicit=True)))
     elif args.stop:
         service.stop_service()
         print(json.dumps({"stopped": True}))

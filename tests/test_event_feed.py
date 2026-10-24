@@ -194,12 +194,18 @@ def test_default_feed_path_creates_its_directory(monkeypatch, tmp_path):
     assert events.feed_file_path().exists()
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX mode bits; Windows installer ACL is tested separately"
+)
 def test_feed_file_created_owner_only():
     events._touch_feed_file()
     mode = stat.S_IMODE(events.feed_file_path().stat().st_mode)
     assert mode == 0o600
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX mode bits; Windows installer ACL is tested separately"
+)
 def test_existing_world_readable_feed_file_is_tightened():
     path = events.feed_file_path()
     path.touch()
@@ -223,7 +229,8 @@ async def test_rotated_world_readable_file_is_tightened_on_write():
         if not events._pending_msgs:
             break
 
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert path.read_text(encoding="utf-8").strip()
 
 

@@ -38,6 +38,10 @@ dependencies = [
 windows = [
     "pystray>=0.19.5,<0.20",
     "tomlkit>=0.13.3,<1",
+    "tomli>=2; python_version < '3.11'",
+    "psutil>=6,<8",
+    "cryptography>=44",
+    "python-socks>=2.4.3",
 ]
 # Required only when TELEGRAM_PROXY_TYPE is set to socks5/socks4/http.
 proxy = [
@@ -74,6 +78,11 @@ target-version = ['py311']
 [dependency-groups]
 windows-build = ["pyinstaller>=6.15,<7"]
 dev = [
+    "tomlkit>=0.13.3,<1",
+    "tomli>=2; python_version < '3.11'",
+    "psutil>=6,<8",
+    "cryptography>=44",
+    "python-socks>=2.4.3",
     "black>=25.9.0",
     "flake8>=7.3.0",
     "pre-commit>=4.6.0",

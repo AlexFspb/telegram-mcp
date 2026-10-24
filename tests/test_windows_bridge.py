@@ -12,8 +12,11 @@ import time
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import pytest
+from mcp.shared.exceptions import McpError
 
-from windows_app import service, settings
+from windows_app import security, service, settings
+
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows process acceptance test")
 
 
 @pytest.mark.asyncio
@@ -26,6 +29,7 @@ async def test_two_stdio_processes_share_backend_and_survive_peer_exit(tmp_path,
         port = probe.getsockname()[1]
     (root / "state" / "service-settings.json").write_text(json.dumps({"port": port}))
     monkeypatch.setenv("ALEX_TELEGRAM_MCP_HOME", str(root))
+    security.prepare_endpoint()
     repo = Path(__file__).resolve().parent.parent
     env = dict(os.environ, PYTHONPATH=str(repo))
     with open(tmp_path / "fixture.log", "w") as log:
@@ -36,6 +40,7 @@ async def test_two_stdio_processes_share_backend_and_survive_peer_exit(tmp_path,
             stderr=log,
             creationflags=settings.CREATE_HIDDEN,
         )
+        servers = [server]
         try:
             deadline = time.monotonic() + 12
             while not service.status():
@@ -75,12 +80,40 @@ async def test_two_stdio_processes_share_backend_and_survive_peer_exit(tmp_path,
                         assert parsed == {"label": "second", "pid": backend_pid}
                         picture = await client.call_tool("image", {})
                         assert any(block.type == "image" for block in picture.content)
+                        # The backend executes an operation but the response is lost.
+                        # The bridge must return an error without replaying it.
+                        with pytest.raises(McpError, match="Запрос не повторён"):
+                            await client.call_tool("drop_transport", {})
+                        assert (root / "state/effects.txt").read_text().splitlines() == ["effect"]
+                        await client.call_tool("ping", {"label": "after-error"})
+
+                        # Replace the backend while this same stdio session stays open.
+                        settings.run_hidden(["taskkill", "/PID", str(server.pid), "/T", "/F"])
+                        server.wait(timeout=10)
+                        replacement = subprocess.Popen(
+                            [sys.executable, str(repo / "tests/windows_fake_backend.py")],
+                            env=env,
+                            stdout=log,
+                            stderr=log,
+                            creationflags=settings.CREATE_HIDDEN,
+                        )
+                        servers.append(replacement)
+                        deadline = time.monotonic() + 12
+                        while not service.status():
+                            if time.monotonic() > deadline:
+                                pytest.fail("Replacement backend did not start")
+                            await asyncio.sleep(0.1)
+                        new_pid = service.status()["pid"]
+                        result = await client.call_tool("ping", {"label": "after-restart"})
+                        parsed = result.structuredContent or json.loads(result.content[0].text)
+                        assert parsed == {"label": "after-restart", "pid": new_pid}
+                        assert new_pid != backend_pid
+                        assert (root / "state/effects.txt").read_text().splitlines() == ["effect"]
 
             await asyncio.wait_for(asyncio.gather(first(), second()), timeout=50)
-            assert server.poll() is None
+            assert servers[-1].poll() is None
         finally:
-            if os.name == "nt":
-                settings.run_hidden(["taskkill", "/PID", str(server.pid), "/T", "/F"])
-            else:
-                server.terminate()
-            server.wait(timeout=10)
+            for process in servers:
+                if process.poll() is None:
+                    settings.run_hidden(["taskkill", "/PID", str(process.pid), "/T", "/F"])
+                process.wait(timeout=10)

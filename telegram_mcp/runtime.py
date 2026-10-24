@@ -169,7 +169,7 @@ def _require_api_credentials() -> tuple[int, str]:
         sys.exit(1)
 
 
-load_dotenv()
+load_dotenv(dotenv_path=os.getenv("TELEGRAM_MCP_ENV_FILE") or None)
 
 TELEGRAM_API_ID, TELEGRAM_API_HASH = _require_api_credentials()
 
@@ -2288,9 +2288,15 @@ def _contains_forbidden_path_patterns(raw_path: str) -> Optional[str]:
     value = raw_path.strip()
     if not value:
         return "Path must not be empty."
+    # Reject network/device names lexically, before any filesystem operation.
+    normalized = value.replace("\\", "/")
+    if normalized.startswith(("//", "/??/")) or "\x00" in value:
+        return "Network and device paths are not allowed."
+    if os.name == "nt" and (normalized.startswith("/") or ":" in normalized[2:]):
+        return "Root-relative paths and alternate data streams are not allowed."
     if any(token in value for token in DISALLOWED_PATH_PATTERNS):
         return "Path contains disallowed wildcard/shell patterns."
-    if ".." in Path(value).parts:
+    if ".." in normalized.split("/"):
         return "Path traversal is not allowed."
     return None
 
@@ -2307,7 +2313,38 @@ def _coerce_root_uri_to_path(uri: str) -> Path:
         # file:///C:/tmp -> C:/tmp on Windows
         if decoded_path[2] == ":":
             decoded_path = decoded_path[1:]
+    error = _contains_forbidden_path_patterns(decoded_path)
+    if error:
+        raise ValueError(error)
+    _reject_windows_reparse_points(Path(decoded_path))
     return Path(decoded_path).resolve(strict=True)
+
+
+def _reject_windows_reparse_points(candidate: Path) -> None:
+    """Do not follow a local junction/symlink to an SMB/WebDAV target."""
+    if os.name != "nt":
+        return
+    import stat
+
+    for part in reversed((candidate, *candidate.parents)):
+        try:
+            attributes = part.lstat().st_file_attributes
+        except FileNotFoundError:
+            continue
+        if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError("Windows reparse points are not allowed in file paths.")
+
+
+def _preflight_file_path(candidate: Path, roots: List[Path]) -> Optional[str]:
+    """Check containment without resolve/stat, then inspect only local components."""
+    candidate = Path(os.path.abspath(candidate))
+    if not any(candidate == root or root in candidate.parents for root in roots):
+        return "Path is outside allowed roots."
+    try:
+        _reject_windows_reparse_points(candidate)
+    except ValueError:
+        return "Windows reparse points are not allowed in file paths."
+    return None
 
 
 def _path_is_within_root(candidate: Path, root: Path) -> bool:
@@ -2405,6 +2442,9 @@ def _coerce_paths_from_list_roots_validation_error(error: Exception) -> List[Pat
             # Unix absolute path, or Windows drive path like C:\...
             continue
         try:
+            if _contains_forbidden_path_patterns(candidate):
+                continue
+            _reject_windows_reparse_points(Path(candidate).expanduser())
             recovered.append(Path(candidate).expanduser().resolve())
         except Exception:
             continue
@@ -2577,6 +2617,9 @@ async def _resolve_readable_file_path(
     if not candidate.is_absolute():
         candidate = _first_resolution_root(roots) / candidate
 
+    preflight_error = _preflight_file_path(candidate, roots)
+    if preflight_error:
+        return None, preflight_error
     try:
         candidate = candidate.resolve(strict=True)
     except FileNotFoundError:
@@ -2630,6 +2673,12 @@ async def _resolve_writable_file_path(
         else:
             candidate = first_root / safe_name
 
+    pattern_error = _contains_forbidden_path_patterns(str(candidate))
+    if pattern_error:
+        return None, pattern_error
+    preflight_error = _preflight_file_path(candidate, roots)
+    if preflight_error:
+        return None, preflight_error
     candidate = candidate.resolve(strict=False)
     parent = candidate.parent.resolve(strict=False)
     if not _path_is_within_any_root(candidate, roots) or not _path_is_within_any_root(
@@ -2709,7 +2758,11 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
 
     resolved_roots: List[Path] = []
     for raw_root in raw_roots:
+        error = _contains_forbidden_path_patterns(raw_root)
+        if error:
+            raise SystemExit(error)
         root = Path(raw_root).expanduser()
+        _reject_windows_reparse_points(root)
         if not root.exists():
             try:
                 root.mkdir(parents=True, exist_ok=True)

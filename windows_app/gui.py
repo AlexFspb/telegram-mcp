@@ -9,9 +9,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from dotenv import dotenv_values
-
-from windows_app import VERSION, service, settings
+from windows_app import VERSION, auth, security, service, settings
 
 
 class Manager:
@@ -100,7 +98,7 @@ class Manager:
             manage, text="Один сервер обслуживает все чаты и все три приложения.", wraplength=530
         ).pack(anchor="w", pady=(0, 14))
         for label, action in (
-            ("Запустить сервер", service.ensure_service),
+            ("Запустить сервер", lambda: service.ensure_service(explicit=True)),
             ("Остановить сервер", service.stop_service),
         ):
             self.button(manage, label, lambda action=action: self.work(action)).pack(
@@ -115,6 +113,26 @@ class Manager:
         self.button(
             manage, "Открыть папку журналов", lambda: self.open_path(settings.root() / "logs")
         ).pack(fill="x", pady=5)
+        self.button(manage, "Выйти из аккаунта Telegram", self.logout).pack(fill="x", pady=5)
+        self.button(manage, "Удалить Telegram MCP", self.uninstall).pack(fill="x", pady=5)
+        proxy_tab = ttk.Frame(tabs, padding=16)
+        tabs.add(proxy_tab, text="Прокси")
+        self.proxy_fields = {}
+        for key, title in (
+            ("TELEGRAM_PROXY_TYPE", "Тип: socks5, socks4, http или none"),
+            ("TELEGRAM_PROXY_HOST", "Адрес"),
+            ("TELEGRAM_PROXY_PORT", "Порт"),
+            ("TELEGRAM_PROXY_USERNAME", "Имя пользователя"),
+            ("TELEGRAM_PROXY_PASSWORD", "Пароль"),
+        ):
+            self.proxy_fields[key] = tk.StringVar(value=data.get(key, ""))
+            ttk.Label(proxy_tab, text=title).pack(anchor="w")
+            ttk.Entry(
+                proxy_tab,
+                textvariable=self.proxy_fields[key],
+                show="●" if key.endswith("PASSWORD") else "",
+            ).pack(fill="x", pady=(4, 10))
+        self.button(proxy_tab, "Сохранить прокси", self.save_proxy).pack(fill="x", pady=10)
         ttk.Label(
             manage, text="API-данные и сеанс Telegram хранятся локально:", wraplength=530
         ).pack(anchor="w", pady=(22, 5))
@@ -182,13 +200,19 @@ class Manager:
         selected, autostart = self.selected_clients(), self.autostart.get()
 
         def action():
-            service.stop_service()
-            settings.save_credentials(api_id, api_hash)
-            settings.install_binary()
-            asyncio.run(self.authorize(method, phone))
-            settings.register_task(autostart)
-            settings.configure_clients(selected)
-            service.ensure_service()
+            with service.local_lock("bootstrap.lock", timeout=180):
+                service.stop_service()
+                settings.save_credentials(api_id, api_hash)
+                settings.install_binary()
+                try:
+                    with service.local_lock("backend.lock", timeout=2):
+                        asyncio.run(self.authorize(method, phone))
+                    settings.register_task(autostart)
+                    settings.configure_clients(selected)
+                except Exception:
+                    # Leave stopped on failed auth, rather than opening the session twice.
+                    raise
+            service.ensure_service(explicit=True)
 
         self.work(
             action,
@@ -202,62 +226,59 @@ class Manager:
             "Настройки сохранены. Перезапустите выбранные приложения.",
         )
 
-    async def authorize(self, method, phone):  # noqa: C901 - bounded interactive auth flow
-        import qrcode
-        from telethon import TelegramClient, errors
+    async def authorize(self, method, phone):
+        await auth.authorize(method, phone, self.ask, lambda png: self.events.put(("qr", png)))
 
-        data = settings.values()
-        client = TelegramClient(
-            data["TELEGRAM_SESSION_NAME"],
-            int(data["TELEGRAM_API_ID"]),
-            data["TELEGRAM_API_HASH"],
-            device_model="Alex Telegram MCP",
-            system_version="Windows",
-            app_version=VERSION,
-        )
-        await client.connect()
-        try:
-            if not await client.is_user_authorized():
-                if method == "qr":
-                    for _ in range(3):
-                        qr = await client.qr_login()
-                        png = io.BytesIO()
-                        qrcode.make(qr.url).save(png, format="PNG")
-                        self.events.put(("qr", png.getvalue()))
-                        try:
-                            await qr.wait(timeout=60)
-                            break
-                        except asyncio.TimeoutError:
-                            continue
-                        except errors.SessionPasswordNeededError:
-                            await client.sign_in(
-                                password=self.ask("Пароль двухэтапной проверки Telegram", True)
-                            )
-                            break
-                    else:
-                        raise RuntimeError("QR-код не подтверждён. Повторите вход.")
-                else:
-                    if not phone:
-                        raise ValueError("Введите номер телефона с кодом страны.")
-                    sent = await client.send_code_request(phone)
-                    try:
-                        await client.sign_in(
-                            phone=phone,
-                            code=self.ask("Код входа из Telegram", True),
-                            phone_code_hash=sent.phone_code_hash,
-                        )
-                    except errors.SessionPasswordNeededError:
-                        await client.sign_in(
-                            password=self.ask("Пароль двухэтапной проверки Telegram", True)
-                        )
-            if not await client.is_user_authorized():
-                raise RuntimeError("Telegram не подтвердил вход.")
-            me = await client.get_me()
-            if me.bot:
-                raise ValueError("Для установки нужен личный аккаунт Telegram.")
-            settings.save({"TELEGRAM_EXPECTED_USERNAME": me.username or ""})
-        finally:
-            await client.disconnect()
+    def logout(self):
+        if not messagebox.askyesno(
+            "Telegram MCP", "Завершить сеанс Telegram на этом компьютере?", parent=self.window
+        ):
+            return
+
+        def action():
+            with service.local_lock("bootstrap.lock", timeout=180):
+                service.stop_service()
+                with service.local_lock("backend.lock", timeout=2):
+                    asyncio.run(auth.logout())
+
+        self.work(action, "Сеанс завершён. Для подключения выполните вход заново.")
+
+    def uninstall(self):
+        if not messagebox.askyesno(
+            "Telegram MCP",
+            "Удалить программу, настройки MCP и завершить сеанс? Скачанные файлы сохранятся.",
+            parent=self.window,
+        ):
+            return
+
+        def action():
+            import os
+
+            with service.local_lock("bootstrap.lock", timeout=180):
+                service.stop_service()
+                with service.local_lock("backend.lock", timeout=2):
+                    if settings.env_path().exists():
+                        asyncio.run(auth.logout())
+                settings.unregister()
+                security.stop_bridges()
+                settings.schedule_binary_removal(os.getpid())
+            self.events.put(("exit",))
+
+        self.work(action)
+
+    def save_proxy(self):
+        changes = {key: value.get().strip() for key, value in self.proxy_fields.items()}
+
+        def action():
+            previous = settings.values()
+            settings.save(changes)
+            try:
+                settings.proxy_config()
+            except Exception:
+                settings.save({key: previous.get(key, "") for key in changes})
+                raise
+
+        self.work(action, "Прокси сохранён. Перезапустите сервер для применения.")
 
     def poll(self):  # noqa: C901 - single UI event dispatcher
         from PIL import Image, ImageTk
@@ -265,6 +286,9 @@ class Manager:
         try:
             while True:
                 event = self.events.get_nowait()
+                if event[0] == "exit":
+                    self.window.destroy()
+                    return
                 if event[0] in {"done", "error"}:
                     self.busy = False
                     self.photo = None

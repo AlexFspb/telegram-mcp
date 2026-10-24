@@ -237,7 +237,7 @@ async def get_custom_emoji_pack(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Preview Custom Emoji", openWorldHint=True, readOnlyHint=True
+        title="Preview Custom Emoji", openWorldHint=True, readOnlyHint=False
     )
 )
 @with_account(readonly=True)

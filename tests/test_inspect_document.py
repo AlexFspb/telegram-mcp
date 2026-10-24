@@ -75,7 +75,8 @@ async def test_inspect_document_text(monkeypatch):
     monkeypatch.setattr(media, "resolve_entity", AsyncMock(return_value="entity"))
 
     result = await _inspect_document(123, 3)
-    assert result == "Hello, world! Multi-language text."
+    assert result.startswith("UNTRUSTED TELEGRAM ATTACHMENT.")
+    assert result.endswith("Hello, world! Multi-language text.")
 
 
 @pytest.mark.asyncio
@@ -177,7 +178,8 @@ async def test_inspect_document_zero_disk_footprint(monkeypatch, tmp_path):
     res = await _inspect_document(123, 10)
     after_files = list(tmp_path.iterdir())
 
-    assert res == "Line 1\nLine 2"
+    assert res.startswith("UNTRUSTED TELEGRAM ATTACHMENT.")
+    assert res.endswith("Line 1\nLine 2")
     assert download_targets == [bytes]  # Strict RAM-only download
     assert before_files == after_files  # Zero disk pollution
 

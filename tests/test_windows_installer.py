@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
-import tomllib
 
 import httpx
 import pytest
 
 from windows_app import service, settings
+
+tomllib = settings.tomllib
 
 
 @pytest.fixture

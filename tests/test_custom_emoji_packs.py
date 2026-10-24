@@ -87,7 +87,7 @@ def _mock_custom_emoji_doc(
 # ---------------------------------------------------------
 # Test: FastMCP Registration & Annotations
 # ---------------------------------------------------------
-def test_tools_are_registered_and_read_only():
+def test_tools_are_registered_with_correct_file_write_annotation():
     registered = {t.name: t for t in mcp._tool_manager.list_tools()}
     assert "get_custom_emoji_packs" in registered
     assert "get_custom_emoji_pack" in registered
@@ -95,7 +95,7 @@ def test_tools_are_registered_and_read_only():
 
     assert registered["get_custom_emoji_packs"].annotations.readOnlyHint is True
     assert registered["get_custom_emoji_pack"].annotations.readOnlyHint is True
-    assert registered["preview_custom_emoji"].annotations.readOnlyHint is True
+    assert registered["preview_custom_emoji"].annotations.readOnlyHint is False
 
 
 def test_stickers_alias_exports():

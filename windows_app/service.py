@@ -17,13 +17,13 @@ import time
 import urllib.error
 import urllib.request
 
-from windows_app import VERSION, settings
+from windows_app import VERSION, security, settings
 
 SERVICE_NAME = "alex-telegram-mcp"
 
 
 def base_url() -> str:
-    return f"http://127.0.0.1:{settings.port()}"
+    return f"https://127.0.0.1:{settings.port()}"
 
 
 def request(path: str, method: str = "GET", timeout: float = 2.0):
@@ -31,7 +31,10 @@ def request(path: str, method: str = "GET", timeout: float = 2.0):
     req = urllib.request.Request(
         base_url() + path, method=method, headers={"Authorization": "Bearer " + auth}
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=security.tls_context()),
+    )
     with opener.open(req, timeout=timeout) as response:
         return json.loads(response.read())
 
@@ -73,11 +76,19 @@ def local_lock(name: str, timeout: float = 45):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def ensure_service():
+def ensure_service(explicit=False):  # noqa: C901
+    if explicit:
+        (settings.state() / "stopped").unlink(missing_ok=True)
+    elif (settings.state() / "stopped").exists():
+        raise RuntimeError(
+            "Сервер остановлен пользователем. Запустите его через значок или настройки."
+        )
     current = status()
     if current:
         return current
     with local_lock("bootstrap.lock"):
+        if (settings.state() / "stopped").exists():
+            raise RuntimeError("Сервер остановлен пользователем.")
         current = status()
         if current:
             return current
@@ -111,19 +122,68 @@ def ensure_service():
         raise RuntimeError("Сервер не ответил. Проверьте журнал backend.log в папке приложения.")
 
 
-def stop_service():
+def stop_service():  # noqa: C901 - graceful shutdown and verified-process fallback
+    settings.atomic_write(settings.state() / "stopped", "yes\n")
     current = status()
+    if not current and not security.recorded_processes():
+        _stop_legacy_server()
     if current:
-        request("/control/shutdown", method="POST")
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            if not status() and not any(
-                process_alive(pid)
-                for pid in {current["pid"], current.get("launcher_pid", current["pid"])}
-            ):
-                return
-            time.sleep(0.2)
-        raise RuntimeError("Сервер ещё завершает работу.")
+        try:
+            request("/control/shutdown", method="POST")
+        except OSError:
+            pass
+    processes = security.recorded_processes()
+    deadline = time.monotonic() + (25 if current else 2)
+    while time.monotonic() < deadline:
+        if not any(process.is_running() for process in processes):
+            return
+        time.sleep(0.2)
+    # A PID alone is insufficient: recorded creation time and image must match.
+    for process in security.recorded_processes():
+        try:
+            process.kill()
+            process.wait(timeout=8)
+        except security.psutil.NoSuchProcess:
+            pass
+    if security.recorded_processes():
+        raise RuntimeError("Не удалось остановить сервер. Вход в сеанс не начат.")
+
+
+def _stop_legacy_server():
+    """Upgrade 1.0.0 only after verifying the listener's executable and user."""
+    import psutil
+
+    expected = os.path.normcase(str(settings.executable().resolve()))
+    for endpoint in psutil.net_connections(kind="tcp4"):
+        if endpoint.status != psutil.CONN_LISTEN or not endpoint.laddr:
+            continue
+        if endpoint.laddr.ip != "127.0.0.1" or endpoint.laddr.port != settings.port():
+            continue
+        process = psutil.Process(endpoint.pid)
+        if (
+            os.path.normcase(process.exe()) != expected
+            or process.username() != psutil.Process().username()
+        ):
+            raise RuntimeError("Порт занят другим процессом. Обновление остановлено.")
+        record = security.identity(process.pid)
+        parent = process.parent()
+        records = [record]
+        if parent and os.path.normcase(parent.exe()) == expected:
+            records.append(security.identity(parent.pid))
+        settings.atomic_write(settings.state() / "backend-process.json", json.dumps(records))
+        # The exact owned 1.0.0 image is verified; no arbitrary HTTP endpoint gets a token.
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{settings.port()}/control/shutdown",
+            method="POST",
+            headers={"Authorization": "Bearer " + settings.token()},
+        )
+        try:
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                req, timeout=2
+            ).close()
+        except OSError:
+            pass
+        return
 
 
 def process_alive(pid: int) -> bool:
@@ -145,38 +205,90 @@ def process_alive(pid: int) -> bool:
         kernel.CloseHandle(handle)
 
 
-async def bridge():
-    """Forward protocol frames, including images/errors, without duplicating tools."""
+async def bridge():  # noqa: C901 - JSON/SSE forwarding with per-request failure isolation
+    """Independent stateless requests survive restarts; never replay a sent call."""
     import anyio
     import httpx
-    from mcp.client.streamable_http import streamable_http_client
+    from httpx_sse import EventSource
+    from mcp import types
     from mcp.server.stdio import stdio_server
+    from mcp.shared.message import SessionMessage
 
-    await asyncio.to_thread(ensure_service)
     async with httpx.AsyncClient(
         headers={"Authorization": "Bearer " + settings.token()},
         timeout=httpx.Timeout(90, read=120),
         trust_env=False,
+        verify=security.tls_context(),
     ) as http:
-        async with streamable_http_client(base_url() + "/mcp", http_client=http) as (
-            remote_in,
-            remote_out,
-            _,
-        ):
-            async with stdio_server() as (local_in, local_out):
-                async with anyio.create_task_group() as tasks:
+        async with stdio_server() as (local_in, local_out):
+            protocol = None
 
-                    async def pump(source, destination):
-                        try:
-                            async for message in source:
-                                if isinstance(message, Exception):
-                                    raise message
-                                await destination.send(message)
-                        finally:
-                            tasks.cancel_scope.cancel()
+            async def deliver(message, initializing):
+                nonlocal protocol
+                if initializing and isinstance(message.root, types.JSONRPCResponse):
+                    protocol = message.root.result.get("protocolVersion")
+                await local_out.send(SessionMessage(message))
 
-                    tasks.start_soon(pump, local_in, remote_out)
-                    tasks.start_soon(pump, remote_in, local_out)
+            async def forward(frame):
+                message = frame.message.root
+                initializing = (
+                    isinstance(message, types.JSONRPCRequest) and message.method == "initialize"
+                )
+                try:
+                    await asyncio.to_thread(ensure_service)
+                    async with http.stream(
+                        "POST",
+                        base_url() + "/mcp",
+                        headers={
+                            "Accept": "application/json, text/event-stream",
+                            **(
+                                {"MCP-Protocol-Version": protocol}
+                                if protocol and not initializing
+                                else {}
+                            ),
+                        },
+                        json=frame.message.model_dump(by_alias=True, exclude_none=True),
+                    ) as response:
+                        response.raise_for_status()
+                        if response.status_code == 202:
+                            return
+                        if response.headers.get("content-type", "").startswith("application/json"):
+                            await response.aread()
+                            await deliver(
+                                types.JSONRPCMessage.model_validate(response.json()), initializing
+                            )
+                        else:
+                            async for event in EventSource(response).aiter_sse():
+                                if event.event == "message" and event.data:
+                                    await deliver(
+                                        types.JSONRPCMessage.model_validate_json(event.data),
+                                        initializing,
+                                    )
+                except (httpx.HTTPError, OSError, RuntimeError, ValueError):
+                    if isinstance(message, types.JSONRPCRequest):
+                        await local_out.send(
+                            SessionMessage(
+                                types.JSONRPCMessage(
+                                    types.JSONRPCError(
+                                        jsonrpc="2.0",
+                                        id=message.id,
+                                        error=types.ErrorData(
+                                            code=-32000,
+                                            message=(
+                                                "Связь с сервером прервана. Запрос не повторён. "
+                                                "Результат операции может быть неизвестен. Проверьте его перед повтором."
+                                            ),
+                                        ),
+                                    )
+                                )
+                            )
+                        )
+
+            async with anyio.create_task_group() as tasks:
+                async for frame in local_in:
+                    if not isinstance(frame, Exception):
+                        tasks.start_soon(forward, frame)
+                tasks.cancel_scope.cancel()
 
 
 class LocalControl:
@@ -186,6 +298,8 @@ class LocalControl:
         self.app, self.token, self.health, self.shutdown = app, token, health, shutdown
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            return await send({"type": "websocket.close", "code": 1008})
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         from starlette.responses import JSONResponse
@@ -204,7 +318,7 @@ class LocalControl:
         return await self.app(scope, receive, send)
 
 
-def _tray(shutdown, ready: threading.Event):
+def _tray(shutdown, ready: threading.Event, stopped: threading.Event):
     import pystray
     from PIL import Image, ImageDraw
 
@@ -219,6 +333,7 @@ def _tray(shutdown, ready: threading.Event):
         subprocess.Popen(settings.command(), creationflags=settings.CREATE_HIDDEN, close_fds=True)
 
     def stop(icon, item):
+        settings.atomic_write(settings.state() / "stopped", "yes\n")
         shutdown()
         icon.stop()
 
@@ -236,44 +351,72 @@ def _tray(shutdown, ready: threading.Event):
         icon.visible = True
         ready.set()
 
+        def monitor():
+            stopped.wait()
+            icon.stop()
+
+        threading.Thread(target=monitor, daemon=True).start()
+
     icon.run(setup=setup)
 
 
-def serve():
-    import logging
-    from dotenv import load_dotenv
-
-    log_path = settings.root() / "logs" / "backend.log"
-    log_path.parent.mkdir(exist_ok=True)
-    log = open(log_path, "a", encoding="utf-8", buffering=1)
-    sys.stdout = log
-    sys.stderr = log
-    logging.basicConfig(level=logging.WARNING, stream=log, force=True)
+def configure_environment():
     # Credentials belong to this installation, never to an inherited client environment.
     for name in list(os.environ):
-        if name.startswith(
-            ("TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME_", "TELEGRAM_EXPECTED_USERNAME")
-        ):
+        if name.startswith(("TELEGRAM_", "MCP_")):
             os.environ.pop(name, None)
-    load_dotenv(settings.env_path(), override=True)
+    os.environ.update(
+        {key: value for key, value in settings.values().items() if value is not None}
+    )
+    os.environ["TELEGRAM_MCP_ENV_FILE"] = str(settings.env_path())
+    os.environ["TELEGRAM_SESSION_NAME"] = str(settings.state() / "telegram")
+    os.environ["TELEGRAM_ALLOWED_ROOTS"] = ""
+    os.environ["TELEGRAM_SERVER_ROOTS_ONLY"] = "1"
     os.environ["MCP_TRANSPORT"] = "http"
     os.environ["MCP_HOST"] = "127.0.0.1"
     os.environ["MCP_PORT"] = str(settings.port())
     os.environ["MCP_ALLOWED_HOSTS"] = f"127.0.0.1:{settings.port()}"
     os.environ["MCP_ALLOWED_ORIGINS"] = ""
     os.environ["TELEGRAM_SESSION_LOCK"] = "exclusive"
-    os.chdir(settings.root())
+    os.chdir(settings.state())
 
+
+def serve():
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    log_path = settings.root() / "logs" / "backend.log"
+    log_path.parent.mkdir(exist_ok=True)
+    handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    logging.basicConfig(level=logging.WARNING, handlers=[handler], force=True)
+
+    class LogStream:
+        def write(self, text):
+            if text.strip():
+                logging.getLogger("backend").warning(text.rstrip())
+
+        def flush(self):
+            handler.flush()
+
+    sys.stdout = sys.stderr = LogStream()
+    (settings.state() / "stopped").unlink(missing_ok=True)
+    configure_environment()
     with local_lock("backend.lock", timeout=0.5):
+        security.record_process()
+        security.prepare_endpoint()
         from telegram_mcp import runner
         from telegram_mcp import runtime
 
         async def serve_authenticated(_transport):
             import uvicorn
 
+            if not settings.values().get("TELEGRAM_EXPECTED_USER_ID"):
+                me = await runtime.clients["default"].get_me()
+                settings.save({"TELEGRAM_EXPECTED_USER_ID": str(me.id)})
             runner._configure_transport_security()
             started = datetime.now(timezone.utc).isoformat()
             tray_ready = threading.Event()
+            tray_stopped = threading.Event()
             loop = asyncio.get_running_loop()
             server = None
 
@@ -302,13 +445,20 @@ def serve():
                     app,
                     host="127.0.0.1",
                     port=settings.port(),
+                    ssl_certfile=str(security.certificate()),
+                    ssl_keyfile=str(security.private_key()),
                     access_log=False,
                     log_level="warning",
-                    timeout_graceful_shutdown=10,
+                    timeout_graceful_shutdown=5,
                 )
             )
-            threading.Thread(target=_tray, args=(shutdown, tray_ready), daemon=True).start()
-            await server.serve()
+            threading.Thread(
+                target=_tray, args=(shutdown, tray_ready, tray_stopped), daemon=True
+            ).start()
+            try:
+                await server.serve()
+            finally:
+                tray_stopped.set()
 
         runner._serve = serve_authenticated
         sys.argv = ["TelegramMCP", "--transport", "http", str(settings.root() / "files")]

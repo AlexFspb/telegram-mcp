@@ -244,7 +244,9 @@ def test_alias_file_is_owner_only_and_written_atomically():
     runtime.save_aliases({"андрей": 1})
     path = runtime.aliases_file_path()
 
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert _ids(runtime.load_aliases()) == {"андрей": 1}
     assert not path.with_suffix(".tmp").exists()
 
 
@@ -295,15 +297,20 @@ def test_update_aliases_does_not_lose_a_concurrent_write():
     assert _ids(runtime.load_aliases()) == {"первый": 1, "второй": 2, "третий": 3}
 
 
-def test_update_aliases_refuses_to_write_over_an_unreadable_file():
+def test_update_aliases_refuses_to_write_over_an_unreadable_file(monkeypatch):
     path = runtime.aliases_file_path()
     runtime.save_aliases({"важный": 1})
-    os.chmod(path, 0o000)
-    try:
+    original_read = type(path).read_text
+
+    def unreadable(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("simulated unreadable file")
+        return original_read(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(path), "read_text", unreadable)
         with pytest.raises(runtime.AliasStoreUnreadable):
             runtime.update_aliases(lambda a: a.__setitem__("новый", {"id": 2}))
-    finally:
-        os.chmod(path, 0o600)
 
     assert _ids(runtime.load_aliases()) == {"важный": 1}  # nothing destroyed
 
