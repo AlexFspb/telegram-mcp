@@ -22,6 +22,28 @@ from windows_app import VERSION, security, settings
 SERVICE_NAME = "alex-telegram-mcp"
 
 
+class BackendLogStream:
+    """Text stream used by logging and uvicorn's terminal-color detection."""
+
+    encoding = "utf-8"
+
+    def __init__(self, handler):
+        self.handler = handler
+
+    def write(self, text):
+        import logging
+
+        if text.strip():
+            logging.getLogger("backend").warning(text.rstrip())
+        return len(text)
+
+    def flush(self):
+        self.handler.flush()
+
+    def isatty(self):
+        return False
+
+
 def base_url() -> str:
     return f"https://127.0.0.1:{settings.port()}"
 
@@ -390,15 +412,7 @@ def serve():
     handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
     logging.basicConfig(level=logging.WARNING, handlers=[handler], force=True)
 
-    class LogStream:
-        def write(self, text):
-            if text.strip():
-                logging.getLogger("backend").warning(text.rstrip())
-
-        def flush(self):
-            handler.flush()
-
-    sys.stdout = sys.stderr = LogStream()
+    sys.stdout = sys.stderr = BackendLogStream(handler)
     (settings.state() / "stopped").unlink(missing_ok=True)
     configure_environment()
     with local_lock("backend.lock", timeout=0.5):

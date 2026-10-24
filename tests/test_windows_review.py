@@ -332,3 +332,16 @@ def test_private_windows_directory_acl_contains_only_user_and_system(private):
     acl = read_acl(settings.root())
     assert acl["protected"] is True
     assert set(acl["ids"]) == {settings.user_sid(), "S-1-5-18"}
+
+
+def test_backend_logging_stream_supports_uvicorn_initialization(private, monkeypatch):
+    import logging
+    import uvicorn
+
+    handler = logging.NullHandler()
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", service.BackendLogStream(handler))
+        patch.setattr(sys, "stderr", service.BackendLogStream(handler))
+        config = uvicorn.Config(lambda: None, log_level="warning")
+        assert config.log_level == "warning"
+    assert service.BackendLogStream(handler).isatty() is False
