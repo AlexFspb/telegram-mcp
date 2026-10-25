@@ -18,6 +18,7 @@ class Manager:
         self.window.title("Telegram MCP — установка и настройки")
         self.window.geometry("680x730")
         self.window.minsize(620, 650)
+        self.window.protocol("WM_DELETE_WINDOW", self.close_to_tray)
         self.events = queue.Queue()
         self.busy = False
         self.photo = None
@@ -476,6 +477,13 @@ class Manager:
 
     def run(self):
         self.window.mainloop()
+
+    def close_to_tray(self):
+        if self.busy:
+            self.detail.set("Дождитесь завершения операции. Затем закройте окно настроек.")
+            return
+        # The shared service owns the tray icon; closing settings does not stop it.
+        self.window.destroy()
 
 
 def main():

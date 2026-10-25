@@ -172,3 +172,19 @@ def test_reconfigure_saves_client_selection_and_autostart(manager, monkeypatch):
     manager.reconfigure()
     task.assert_called_once_with(False)
     clients.assert_called_once_with(["codex"])
+
+
+def test_cross_closes_only_settings_and_preserves_shared_server(manager, monkeypatch):
+    from windows_app import gui
+
+    stop = Mock()
+    monkeypatch.setattr(gui.service, "stop_service", stop)
+    manager.close_to_tray()
+    manager.window.destroy.assert_called_once()
+    stop.assert_not_called()
+
+
+def test_cross_does_not_interrupt_in_progress_login(manager):
+    manager.busy = True
+    manager.close_to_tray()
+    manager.window.destroy.assert_not_called()

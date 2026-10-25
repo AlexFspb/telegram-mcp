@@ -1,3 +1,3 @@
 """Windows installer and shared Telegram MCP service."""
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"

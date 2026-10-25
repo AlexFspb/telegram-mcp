@@ -8,7 +8,7 @@ import sqlite3
 import shutil
 import sys
 
-from windows_app import settings, service
+from windows_app import settings, service, windows_stdio
 
 
 def upgrade_current():
@@ -94,6 +94,12 @@ def main():
                     "tcl": interpreter.eval("info patchlevel"),
                     "tcl_bundled": bundled,
                     "source": provenance["url"],
+                    "console_attached": windows_stdio.console_attached(),
+                    "pe_subsystem": (
+                        windows_stdio.pe_subsystem(Path(sys.executable))
+                        if getattr(sys, "frozen", False)
+                        else None
+                    ),
                 }
             )
         )
@@ -120,6 +126,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        windows_stdio.configure_standard_streams(require_protocol="--stdio" in sys.argv)
         main()
     except Exception as error:
         print(f"Telegram MCP: {type(error).__name__}: {error}", file=sys.stderr)

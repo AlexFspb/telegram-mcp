@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-from windows_app import VERSION, security, settings
+from windows_app import VERSION, security, settings, windows_stdio
 
 SERVICE_NAME = "alex-telegram-mcp"
 
@@ -449,6 +449,7 @@ def serve():
                     "started_at": started,
                     "connected": all(client.is_connected() for client in runtime.clients.values()),
                     "tray_visible": tray_ready.is_set(),
+                    "console_attached": windows_stdio.console_attached(),
                 }
 
             app = LocalControl(

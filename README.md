@@ -40,6 +40,13 @@ restricted to the installing user and SYSTEM. They are not embedded in this EXE,
 stored in client configurations, or included in the repository. Attachments use
 the separate `%LOCALAPPDATA%\AlexTelegramMCP\files` folder.
 
+Windows 1.0.4 uses a true GUI-subsystem executable (`console=False`), so Windows
+does not create a terminal for the installer, settings, backend, or MCP bridge.
+Inherited MCP input/output pipes are restored with duplicated native handles;
+the app never allocates or attaches to a console. Keep this setting when rebuilding.
+Closing settings with the cross leaves the shared server and its tray icon running.
+An in-progress login must finish before the settings window can close.
+
 Windows 1.0.1 also detects Claude Desktop MSIX configuration folders. It updates
 both the classic and discovered package configurations, preserving other servers.
 Local connections verify a private installation certificate before sending the
